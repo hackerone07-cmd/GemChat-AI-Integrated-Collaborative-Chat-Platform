@@ -11,31 +11,37 @@ export const createUserController = async (req, res) => {
     res.status(201).json({ user, token });
   } catch (error) {
     console.error("Create User Error:", error);
+    if (error.code === 11000 && error.keyPattern?.email) {
+      return res.status(400).json({ error: "Email already exists" });
+    }
+
     res.status(400).json({ error: error.message });
+
   }
 };
 
 export const loginUserController = async (req, res) => {
   try {
     const { email, password } = req.body;
-    
+
     const user = await User.findOne({ email }).select("+password");
-console.log(user)
+
     if (!user) {
-      return res.status(401).json({ error: "Invalid credentials" });
+      return res.status(401).json({ error: "No account found with this email" });
     }
 
     const isMatch = await user.isValidPassword(password);
     if (!isMatch) {
-      return res.status(401).json({ error: "Invalid credentials" });
+      return res.status(401).json({ error: "Incorrect password" });
     }
 
     const token = await user.generateJWT();
-      delete user._doc.password;
+    delete user._doc.password;
+
     res.status(200).json({ user, token });
   } catch (error) {
     console.error("Login Error:", error);
-    res.status(400).json({ error: error.message });
+    res.status(500).json({ error: "Internal server error" });
   }
 };
 

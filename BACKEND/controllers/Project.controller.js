@@ -36,6 +36,7 @@ export const getAllProject = async (req, res) => {
 export const addUserProject = async (req, res) => {
   try {
     const { projectId, users } = req.body;
+
     const loggedInUser = await userModel.findOne({
       email: req.user.email,
     });
@@ -46,9 +47,20 @@ export const addUserProject = async (req, res) => {
       userId: loggedInUser._id,
     });
 
-    return res.status(200).json({
-      project,
+    // 🔥 Force sockets for those users to join the new project room
+    users.forEach((userId) => {
+      for (const [socketId, socket] of io.of("/").sockets) {
+        if (socket.user && socket.user.id === userId.toString()) {
+          socket.join(projectId);
+          console.log(`✅ Socket ${socketId} joined project ${projectId}`);
+        }
+      }
     });
+
+    // Optionally notify others in the room
+    io.to(projectId).emit("user-joined", { projectId, users });
+
+    return res.status(200).json({ project });
   } catch (error) {
     console.log(error);
     res.status(400).send(error.message);

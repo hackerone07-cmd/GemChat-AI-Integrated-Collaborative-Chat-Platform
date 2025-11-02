@@ -17,77 +17,54 @@ const io = new Server(server,{
     }
 });
 
-io.use(async(socket, next) => {
-    try {
-        const token = socket.handshake.auth?.token || socket.handshake.headers["authorization"]?.split(" ")[1];
-        const projectId = socket.handshake.query?.projectId;
+io.use(async (socket, next) => {
+  const token = socket.handshake.auth?.token || socket.handshake.headers["authorization"]?.split(" ")[1];
+  const projectId = socket.handshake.query?.projectId;
 
-        // Validate token
-        if(!token){
-            return next(new Error("Authentication error"));
-        }
+  if (!token) return next(new Error("Authentication error"));
+  if (!projectId || !mongoose.Types.ObjectId.isValid(projectId))
+    return next(new Error("Invalid project ID"));
 
-        // Validate project ID
-        if (!projectId || !mongoose.Types.ObjectId.isValid(projectId)) {
-            return next(new Error("Invalid project ID"));
-        }
+  const decoded = jwt.verify(token, process.env.JWT_SECRET);
+  socket.user = decoded;
+  socket.projectId = projectId; // ✅ only the ID string
+  next();
+});
 
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        if(!decoded){
-            return next(new Error("Authentication error"));
-        }
+io.on("connection", (socket) => {
+  socket.join(socket.projectId);
+  console.log(`✅ User joined project room: ${socket.projectId}`);
 
-        // Store both user and project ID in socket
-        socket.user = decoded;
-        socket.projectId = await ProjectModel.findOne({_id: projectId});
-        next();
-    } catch (err) {
-        console.log("Socket authentication error:", err);
-        next(new Error("Authentication failed"));
+  socket.on("project-message", async (data) => {
+    const { message, projectId = socket.projectId } = data;
+    if (!projectId) return;
+
+    const ai = message.toLowerCase().includes("@ai");
+
+    if (ai) {
+      const aiResponse = await generateResult(message.replace("@ai", "").trim());
+      io.to(projectId).emit("project-message", {
+        message: aiResponse,
+        sender: "AI Assistant",
+        timestamp: new Date().toISOString(),
+      });
+    } else {
+      // Broadcast to everyone except sender, in this project only
+      socket.broadcast.to(socket.projectId).emit("project-message", {
+        ...data,
+        timestamp: new Date().toISOString(),
+      });
     }
+  });
+
+  socket.on("disconnect", () => {
+    console.log(`❌ User left project room: ${socket.projectId}`);
+    socket.leave(socket.projectId);
+  });
 });
 
-io.on("connection", (socket)=>{
-   
-    socket.join(socket.projectId._id.toString());
-    console.log("a user connected");
-  
-    socket.on("project-message", async(data)=>{
-        const message = data.message;
-        console.log("message received:", message);
 
-        const aiPresentInMessage = message.toLowerCase().includes("@ai"); 
-
-        if(aiPresentInMessage) {
-            // Send typing indicator
-            socket.emit("project-message", {
-                message: "AI is typing...",
-                sender: "AI Assistant",
-                timestamp: new Date().toISOString()
-            });
-
-            const prompt = message.replace('@ai', '').trim();
-            const aiResponse = await generateResult(prompt);
-            
-            io.to(socket.projectId._id.toString()).emit("project-message", {
-                message: aiResponse,
-                sender: "AI Assistant",
-                timestamp: new Date().toISOString()
-            });
-        } else {
-            // Forward regular messages with proper structure
-            socket.broadcast.to(socket.projectId._id.toString()).emit("project-message", {
-                ...data,
-                timestamp: new Date().toISOString()
-            });
-        }
-    });
-    
-    socket.on("disconnect",()=>{
-        console.log("user disconnected");
-        socket.leave(socket.projectId._id.toString());
-    });
-});
+export { io };
 
 
 server.listen(3000,(req,res)=>{

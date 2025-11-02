@@ -2,6 +2,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import axios from '../Config/axios.config'
 import { useContext, useState } from 'react'
 import { UserContext } from '../Context/user.context'
+import { toast } from 'react-toastify';
 function Register() {
 
   const navigate = useNavigate()
@@ -14,6 +15,7 @@ function Register() {
 
   function sumbitHandler(e) {
     e.preventDefault()
+      
 
     axios.post('/users/register',{
       email,
@@ -22,9 +24,21 @@ function Register() {
       console.log(res.data);
       localStorage.setItem('token', res.data.token);
         setUser(res.data.user); 
+         toast.success('Account created successfully!',{
+  position: 'top-center',
+  autoClose: 2000,
+  hideProgressBar: false,
+  closeOnClick: true,
+  pauseOnHover: true,
+  draggable: true,
+});
+
       navigate("/")
     }).catch((err)=>{
-      console.log(err.response.data);
+       const message = err.response?.data?.error || 'Registration failed';
+    
+       toast.error(message);
+
     })
   }
 
