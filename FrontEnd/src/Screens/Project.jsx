@@ -158,32 +158,133 @@ const Project = () => {
   };
 
   // Socket: incoming project messages may include file trees or code snippets
-// Replace your entire useEffect that handles socket messages
-useEffect(() => {
-  // Always initialize once per project
-  const socket = initializeSocket(projectId);
+  useEffect(() => {
+    const socket = initializeSocket(projectId);
 
-  // Function to handle incoming messages
-  const handleIncomingMessage = (data) => {
-    // Don’t duplicate your own message
-    if (data.sender === myEmail) return;
+    if (!userWebcontainer) {
+      getWebcontainer().then((container) => setUserWebcontainer(container));
+    }
 
-    setMessages((prev) => [
-      ...prev,
-      { ...data, direction: "incoming", id: Date.now() + Math.random() },
-    ]);
+    const onProjectMessage = (data) => {
+      setMessages((prev) => [
+        ...prev,
+        { ...data, direction: "incoming", id: Date.now() + Math.random() },
+      ]);
 
-    // You can keep your AI handling logic here (code parsing, etc.)
-  };
+      const raw = String(data?.message ?? "");
 
-  // Attach listener
-  socket.on("project-message", handleIncomingMessage);
+      // Try JSON first
+      let text = raw.trim();
+      const wrapperMatch = text.match(/^```(?:\w+)?\n([\s\S]*)```$/);
+      if (wrapperMatch) text = wrapperMatch[1].trim();
 
-  // Cleanup when leaving project or unmounting
-  return () => {
-    socket.off("project-message", handleIncomingMessage);
-  };
-}, [projectId]); // keep this dependency clean
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed?.fileTree) {
+          const blocks = Object.entries(parsed.fileTree)
+            .map(([filename, node]) => {
+              const contents = node?.file?.contents;
+              if (!contents) return null;
+              const ext = filename.split(".").pop() || "text";
+              return {
+                id: Date.now() + Math.random(),
+                filename,
+                language: ext === "js" ? "javascript" : ext,
+                code: contents.replace(/\\n/g, "\n").replace(/\\t/g, "\t"),
+                explanation: "",
+              };
+            })
+            .filter(Boolean);
+          handleAIBlocks(blocks);
+          return;
+        }
+
+        if (parsed?.code) {
+          const fenceMatch = String(parsed.code).match(
+            /```(\w+)?\n([\s\S]*?)```/
+          );
+          handleAIBlocks([
+            {
+              id: Date.now() + Math.random(),
+              filename: parsed.filename || null,
+              language: fenceMatch?.[1] || parsed.language || "plaintext",
+              code: fenceMatch?.[2]?.trim() || parsed.code,
+              explanation: parsed.explanation || "",
+            },
+          ]);
+          return;
+        }
+      } catch (err) {
+        // not JSON — continue
+      }
+
+      // fallback: extract fenced code blocks
+      const codeBlockRegex = /```(\w+)?\n([\s\S]*?)```/g;
+      const matches = [...text.matchAll(codeBlockRegex)];
+      if (matches.length > 0) {
+        const blocks = matches.map((m) => ({
+          id: Date.now() + Math.random(),
+          filename: null,
+          language: m[1] || "plaintext",
+          code: m[2].trim(),
+          explanation: "",
+        }));
+        handleAIBlocks(blocks);
+      }
+    };
+
+    receiveMessage("project-message", onProjectMessage);
+
+    let mounted = true;
+    setLoading(true);
+
+    const usersReq = axios
+      .get("/users/all")
+      .then((res) => res.data?.users ?? []);
+    const projectReq = projectId
+      ? axios
+          .get(`/projects/get-project/${projectId}`)
+          .then((res) => res.data?.project ?? null)
+          .catch(() => null)
+      : Promise.resolve(null);
+
+    Promise.all([usersReq, projectReq])
+      .then(([allUsers, proj]) => {
+        if (!mounted) return;
+        setUsers(allUsers);
+        // If project returned files, merge them into our blocks
+        if (proj?.fileTree) {
+          const blocks = Object.entries(proj.fileTree)
+            .map(([filename, node]) => {
+              const contents = node?.file?.contents ?? "";
+              const ext = filename.split(".").pop() || "text";
+              return {
+                id: Date.now() + Math.random(),
+                filename,
+                language: ext === "js" ? "javascript" : ext,
+                code: contents,
+                explanation: "",
+              };
+            })
+            .filter(Boolean);
+          if (blocks.length) handleAIBlocks(blocks);
+        }
+
+        if (proj && currentUser) {
+          const myId = getIdFromUser(currentUser);
+          if (myId) setSelectedUserIds(new Set([myId]));
+        }
+      })
+      .catch(() => setError("Failed to load data"))
+      .finally(() => mounted && setLoading(false));
+
+    return () => {
+      mounted = false;
+      if (socket && typeof socket.off === "function")
+        socket.off("project-message", onProjectMessage);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, currentUser]);
 
   useEffect(() => {
     const box = messageBox.current;
@@ -224,8 +325,6 @@ const toggleSelection = async (userId) => {
     console.error("❌ Failed to add collaborator:", err.response?.data || err);
   }
 };
-
-
 
   useEffect(() => {
     const handleFileSelect = (e) => {
@@ -485,7 +584,7 @@ const toggleSelection = async (userId) => {
           >
             ➕ <p>Add Collaborators</p>
           </button>
-          <div className="w-8 h-8 bg-blue-300 cursor-pointer rounded-full flex items-center justify-center ml-auto text-white text-xl">
+          <div className="w-8 h-8 bg-blue-300 rounded-full flex items-center justify-center ml-auto text-white text-xl">
             <button onClick={() => setIsSidePanelOpen(!isSidePanelOpen)}>
               👥
             </button>
@@ -550,7 +649,7 @@ const toggleSelection = async (userId) => {
             />
             <button
               onClick={sendMessageHandler}
-              className="text-blue-500 cursor-pointer text-xl ml-2"
+              className="text-blue-500 text-xl ml-2"
             >
               ✉️
             </button>
