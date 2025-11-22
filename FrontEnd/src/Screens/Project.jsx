@@ -1,4 +1,4 @@
-// src/components/Project.jsx
+
 import React, {
   useEffect,
   useState,
@@ -30,7 +30,7 @@ const Project = () => {
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState([]);
 
-  // SINGLE SOURCE OF TRUTH for files generated/edited (includes AI-provided files):
+  
   const [aiCodeBlocks, setAiCodeBlocks] = useState([]);
 
   const [selectedUserIds, setSelectedUserIds] = useState(new Set());
