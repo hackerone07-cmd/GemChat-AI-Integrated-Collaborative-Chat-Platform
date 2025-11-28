@@ -27,7 +27,7 @@ io.use(async (socket, next) => {
 
   const decoded = jwt.verify(token, process.env.JWT_SECRET);
   socket.user = decoded;
-  socket.projectId = projectId; // ✅ only the ID string
+  socket.projectId = projectId; // only the ID string
   next();
 });
 
