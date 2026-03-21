@@ -1,16 +1,13 @@
 import mongoose from "mongoose";
 
-
-
-
-function connect() {
-    mongoose.connect(process.env.MONGODB_URI)
-    .then(()=>{
-        console.log("connected to mongodb");
-    })
-    .catch(err=>{
-        console.log(err);
-    }) 
+async function connect() {
+  try {
+    await mongoose.connect(process.env.MONGO_URI);
+    console.log("✅ Connected to MongoDB");
+  } catch (err) {
+    console.error("❌ MongoDB connection failed:", err.message);
+    process.exit(1); // crash fast — don't silently run without a database
+  }
 }
 
 export default connect;

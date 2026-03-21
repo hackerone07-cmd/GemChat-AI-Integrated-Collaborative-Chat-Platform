@@ -6,7 +6,7 @@ export const authUser = async (req, res, next) => {
     const authHeader = req.headers.authorization;
     const token =
       req.cookies?.token ||
-      (authHeader?.startsWith("bearer ") ? authHeader.split(" ")[1] : null);
+      (authHeader?.toLowerCase().startsWith("bearer ") ? authHeader.split(" ")[1] : null);
 
     if (!token) {
       return res.status(401).json({ error: "No token provided" });
