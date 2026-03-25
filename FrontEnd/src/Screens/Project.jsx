@@ -416,13 +416,79 @@ const Project=()=>{
     sendMessage("file-renamed",{projectId,oldPath:old,newPath:np,type});
   },[files,active,projectId]);
 
+  // ── Run in WebContainer ───────────────────────────────────────────────────────
+  // Calls getWebcontainer() directly every time — avoids the stale-closure bug
+  // where useCallback captured wc=null and retried forever via setTimeout.
+  const runWebContainerWith=useCallback(async(fileMap)=>{
+    setRunning(true);
+    clrLines();setRpTab("console");
+    addLine("⏳  Booting WebContainer (first load takes ~5s)...","info");
+
+    let instance;
+    try{
+      instance=await getWebcontainer(); // always returns the live instance
+      setWc(instance);                  // keep state in sync for terminal commands
+    }catch(e){
+      addLine(`✗  WebContainer failed to boot: ${e.message}`,"error");
+      addLine("   Make sure your app is served with COOP/COEP headers (already set in vite.config.js).","warning");
+      setRunning(false);return;
+    }
+
+    try{
+      // Build mount map — prefer passed fileMap, fall back to current files state
+      const src=fileMap||files;
+      const mf={};
+      Object.entries(src).forEach(([p,f])=>{mf[p]={file:{contents:f.content||""}};});
+      await instance.mount(mf);
+      addLine("📦  Running npm install...","info");
+
+      if(shellRef.current){try{await shellRef.current.kill();}catch{} shellRef.current=null;}
+
+      const ip=await instance.spawn("npm",["install"]);
+      ip.output.pipeTo(new WritableStream({write(d){
+        const t=d.trim();if(t)addLine(t,"output");
+      }}));
+      const installExit=await ip.exit;
+      if(installExit!==0){addLine("✗  npm install failed — check package.json","error");setRunning(false);return;}
+
+      addLine("✓  Dependencies installed","success");
+      addLine("🚀  Starting Vite dev server...","info");
+
+      const sp=await instance.spawn("npm",["run","dev"]);
+      shellRef.current=sp;
+      sp.output.pipeTo(new WritableStream({write(d){
+        const t=d.trim();if(t)addLine(t,"output");
+      }}));
+
+      // server-ready fires when Vite binds to a port — switch to Browser tab
+      instance.on("server-ready",(_port,url)=>{
+        addLine(`✓  Server ready → ${url}`,"success");
+        addLine("   Switching to Browser tab...","info");
+        setPreviewSrc(url);
+        setPreviewUrl(url);
+        setRpTab("browser");    // ← auto-switch to Browser tab
+        setRunning(false);
+      });
+
+      sp.exit.then(code=>{
+        if(code!=null){
+          addLine(code===0?"  ✓ process exited":`  ✗ process exited ${code}`,code===0?"success":"error");
+          setRunning(false);
+        }
+      });
+    }catch(e){
+      addLine(`✗  ${e.message}`,"error");
+      setRunning(false);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[files,addLine]);
+
   // ── One-click React scaffold ──────────────────────────────────────────────────
   const scaffoldReact=useCallback(async()=>{
     if(scaffolding)return;
     setScaffolding(true);
     clrLines();setRpTab("console");
-    addLine("⚡ Setting up React + Vite project...","info");
-    // Create all scaffold files
+    addLine("⚛  Setting up React + Vite project...","info");
     const newFiles={};
     Object.entries(REACT_SCAFFOLD).forEach(([path,f])=>{
       newFiles[path]={content:f.content,lang:f.lang};
@@ -431,46 +497,13 @@ const Project=()=>{
     setFiles(p=>({...p,...newFiles}));
     setActive("src/App.jsx");
     setTabs(["src/App.jsx","src/main.jsx","package.json"]);
-    addLine("✓ Created project files","success");
-    addLine("  src/App.jsx  src/main.jsx  package.json","output");
-    addLine("  index.html   vite.config.js  src/App.css","output");
+    addLine("✓  Project files created","success");
+    addLine("   src/App.jsx  src/main.jsx  package.json","output");
+    addLine("   index.html   vite.config.js  src/App.css","output");
     addLine("","output");
-    addLine("Starting npm install + dev server...","info");
     setScaffolding(false);
-    // Mount and run after a tick so state settles
-    setTimeout(()=>runWebContainerWith(newFiles),100);
-  },[scaffolding,projectId]);
-
-  // ── Run in WebContainer (with explicit files) ─────────────────────────────────
-  const runWebContainerWith=useCallback(async(fileMap)=>{
-    if(!wc){addLine("⚠ WebContainer not ready yet, retrying in 2s...","warning");setTimeout(()=>runWebContainerWith(fileMap),2000);return;}
-    setRunning(true);
-    try{
-      const mf={};
-      // Build mount object from either fileMap param or current files state
-      const src=fileMap||files;
-      Object.entries(src).forEach(([p,f])=>{
-        mf[p]={file:{contents:f.content||""}};
-      });
-      await wc.mount(mf);
-      addLine("📦 npm install...","info");
-      if(shellRef.current){try{await shellRef.current.kill();}catch{}}
-      const ip=await wc.spawn("npm",["install"]);
-      ip.output.pipeTo(new WritableStream({write(d){addLine(d.trim(),"output");}}));
-      const exitCode=await ip.exit;
-      if(exitCode!==0){addLine("✗ npm install failed","error");setRunning(false);return;}
-      addLine("✓ Dependencies installed","success");
-      addLine("🚀 Starting dev server...","info");
-      const sp=await wc.spawn("npm",["run","dev"]);
-      shellRef.current=sp;
-      sp.output.pipeTo(new WritableStream({write(d){addLine(d.trim(),"output");}}));
-      wc.on("server-ready",(_,url)=>{
-        addLine(`✓ Server ready → ${url}`,"success");
-        setPreviewSrc(url);setPreviewUrl(url);setRpTab("browser");setRunning(false);
-      });
-      sp.exit.then(code=>{if(code!==null&&code!==undefined)setRunning(false);});
-    }catch(e){addLine(`✗ ${e.message}`,"error");setRunning(false);}
-  },[wc,files]);
+    await runWebContainerWith(newFiles);
+  },[scaffolding,projectId,runWebContainerWith]);
 
   // ── Terminal: run arbitrary command ──────────────────────────────────────────
   const runTerminalCommand=useCallback(async(cmdStr)=>{
@@ -478,22 +511,21 @@ const Project=()=>{
     addLine(`$ ${cmdStr}`,"command");
     const parts=cmdStr.trim().split(/\s+/);
     const cmd=parts[0];const args=parts.slice(1);
-    if(!wc){addLine("⚠ WebContainer not available","warning");return;}
-    // Kill existing shell process if running
-    if(shellRef.current){
-      try{await shellRef.current.kill();}catch{}
-      shellRef.current=null;shellInputRef.current=null;
-    }
+
+    let instance;
+    try{ instance=await getWebcontainer();setWc(instance); }
+    catch(e){ addLine(`⚠  WebContainer not available: ${e.message}`,"warning");return; }
+
+    if(shellRef.current){try{await shellRef.current.kill();}catch{}shellRef.current=null;}
     setRunning(true);
     try{
-      const proc=await wc.spawn(cmd,args);
+      const proc=await instance.spawn(cmd,args);
       shellRef.current=proc;
       proc.output.pipeTo(new WritableStream({write(d){
         d.split("\n").forEach(l=>{if(l.trim())addLine(l,"output");});
       }}));
-      // For npm start / npm run dev, listen for server-ready
-      if((cmd==="npm"&&(args[0]==="start"||args[0]==="run"))|| cmd==="vite"){
-        wc.on("server-ready",(_,url)=>{
+      if((cmd==="npm"&&(args[0]==="start"||args[0]==="run"))||cmd==="vite"){
+        instance.on("server-ready",(_,url)=>{
           addLine(`✓ Server → ${url}`,"success");
           setPreviewSrc(url);setPreviewUrl(url);setRpTab("browser");
         });
@@ -502,7 +534,17 @@ const Project=()=>{
       addLine(code===0?"  ✓ done":`  ✗ exited ${code}`,code===0?"success":"error");
     }catch(e){addLine(`✗ ${e.message}`,"error");}
     finally{setRunning(false);shellRef.current=null;}
-  },[wc,addLine]);
+  },[addLine]);
+
+  // ── Right panel drag resize ───────────────────────────────────────────────────
+  const startRpDrag=useCallback(e=>{
+    e.preventDefault();
+    const startX=e.clientX,startW=rpWidth;
+    const onMove=mv=>setRpWidth(Math.max(260,Math.min(700,startW+(startX-mv.clientX))));
+    const onUp=()=>{document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);};
+    document.addEventListener("mousemove",onMove);
+    document.addEventListener("mouseup",onUp);
+  },[rpWidth]);
 
   const handleTermInput=useCallback(e=>{
     if(e.key!=="Enter")return;
@@ -518,19 +560,6 @@ const Project=()=>{
     try{await shellRef.current.kill();}catch{}
     shellRef.current=null;setRunning(false);
   },[addLine]);
-
-  // ── Right panel drag resize ───────────────────────────────────────────────────
-  const startRpDrag=useCallback(e=>{
-    e.preventDefault();
-    const startX=e.clientX,startW=rpWidth;
-    const onMove=mv=>{
-      const delta=startX-mv.clientX;
-      setRpWidth(Math.max(260,Math.min(700,startW+delta)));
-    };
-    const onUp=()=>{document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);};
-    document.addEventListener("mousemove",onMove);
-    document.addEventListener("mouseup",onUp);
-  },[rpWidth]);
 
   // ── Cursor decorations ────────────────────────────────────────────────────────
   const updateDecs=useCallback(()=>{
@@ -651,12 +680,14 @@ const Project=()=>{
   const run=async()=>{
     if(!active||running)return;
     const code=files[active]?.content||"",lang=activeLang;
-    clrLines();setRpTab("console");setRunning(true);
-    addLine(`$ run ${active.split("/").pop()}`,"command");addLine("","output");
+    clrLines();setRpTab("console");
     const hasPkg=Object.keys(files).includes("package.json");
-    if((lang==="javascript"||lang==="typescript")&&hasPkg&&wc){
+    if((lang==="javascript"||lang==="typescript")&&hasPkg){
+      // Web project → WebContainer
       await runWebContainerWith(null);return;
     }
+    setRunning(true);
+    addLine(`$ run ${active.split("/").pop()}`,"command");addLine("","output");
     if(!WB[lang]){addLine(`⚠  "${lang}" not supported for execution`,"warning");setRunning(false);return;}
     try{
       addLine(`  compiling (${WB[lang]})...`,"info");
