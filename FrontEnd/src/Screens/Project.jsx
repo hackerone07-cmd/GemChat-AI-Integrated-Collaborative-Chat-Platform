@@ -287,6 +287,23 @@ const normalizeStoredMessages = (messages = [], myEmail = "") =>
   }));
 
 const PROJECT_CACHE_KEY = "activeProject";
+const REACT_PREVIEW_EXTS = new Set(["js", "jsx", "ts", "tsx", "html", "css", "scss", "sass"]);
+
+const isReactPreviewFile = (path = "", fileMap = {}) => {
+  if (!fileMap["package.json"] || !fileMap["src/App.jsx"]) return false;
+  const cleanPath = path.replace(/^\//, "");
+  const ext = cleanPath.split(".").pop()?.toLowerCase() || "";
+
+  if (cleanPath === "package.json" || cleanPath === "vite.config.js" || cleanPath === "index.html") {
+    return true;
+  }
+
+  if (cleanPath.startsWith("src/") || cleanPath.startsWith("public/")) {
+    return REACT_PREVIEW_EXTS.has(ext);
+  }
+
+  return false;
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Main component
@@ -356,7 +373,6 @@ const Project=()=>{
   const shellRef=useRef(null);
 
   // ── WebContainer + preview ───────────────────────────────────────────────────
-  const [wc,setWc]=useState(null);
   const [previewUrl,setPreviewUrl]=useState("");
   const [previewSrc,setPreviewSrc]=useState(null);
   const [scaffolding,setScaffolding]=useState(false);
@@ -366,6 +382,7 @@ const Project=()=>{
   const filesRef     = useRef({});      // always mirrors files state
   const wcMountedRef = useRef(false);   // true once mount() has succeeded
   const serverReadyOff = useRef(null);  // cleanup fn for server-ready listener
+  const installedPkgRef = useRef(null); // skip reinstall when package.json is unchanged
 
   // Keep filesRef in sync with files state
   useEffect(()=>{ filesRef.current = files; }, [files]);
@@ -543,7 +560,6 @@ const Project=()=>{
     let instance;
     try {
       instance = await getWebcontainer();
-      setWc(instance);
     } catch (e) {
       addLine(`✗  WebContainer boot failed: ${e.message}`, "error");
       addLine("   COOP/COEP headers required — check vite.config.js", "warning");
@@ -557,23 +573,30 @@ const Project=()=>{
       await instance.mount(mountTree);
       wcMountedRef.current = true;   // FS is live — onChange can now writeFile
 
-      addLine("📦  npm install...", "info");
+      const packageJsonContent = src["package.json"]?.content ?? "";
+      const needsInstall = installedPkgRef.current !== packageJsonContent;
+      if (needsInstall) {
+        addLine("📦  npm install...", "info");
 
-      const ip = await instance.spawn("npm", ["install"]);
-      ip.output.pipeTo(new WritableStream({
-        write(chunk) {
-          // Use queueMicrotask so React state updates don't block the stream
-          const line = String(chunk).trim();
-          if (line) queueMicrotask(() => addLine(line, "output"));
-        },
-      }));
-      const installExit = await ip.exit;
-      if (installExit !== 0) {
-        addLine("✗  npm install failed — check package.json", "error");
-        setRunning(false); return;
+        const ip = await instance.spawn("npm", ["install"]);
+        ip.output.pipeTo(new WritableStream({
+          write(chunk) {
+            // Use queueMicrotask so React state updates don't block the stream
+            const line = String(chunk).trim();
+            if (line) queueMicrotask(() => addLine(line, "output"));
+          },
+        }));
+        const installExit = await ip.exit;
+        if (installExit !== 0) {
+          addLine("✗  npm install failed — check package.json", "error");
+          setRunning(false); return;
+        }
+
+        installedPkgRef.current = packageJsonContent;
+        addLine("✓  Dependencies installed", "success");
+      } else {
+        addLine("✓  Using cached dependencies", "success");
       }
-
-      addLine("✓  Dependencies installed", "success");
       addLine("🚀  Starting Vite dev server...", "info");
 
       const sp = await instance.spawn("npm", ["run", "dev"]);
@@ -767,7 +790,6 @@ const Project=()=>{
   useEffect(()=>{
     if(!projectId)return;
     initializeSocket(projectId);
-    getWebcontainer().then(c=>setWc(c)).catch(()=>{});
 
     receiveMessage("message-history",h=>{
       if(!Array.isArray(h))return;
@@ -856,8 +878,7 @@ const Project=()=>{
     if(!active||running)return;
     const code=files[active]?.content||"",lang=activeLang;
     clrLines();setRpTab("console");
-    const hasPkg=Object.keys(files).includes("package.json");
-    if((lang==="javascript"||lang==="typescript")&&hasPkg){
+    if(isReactPreviewFile(active, files)){
       // Web project → WebContainer
       await runWebContainerWith(null);return;
     }
