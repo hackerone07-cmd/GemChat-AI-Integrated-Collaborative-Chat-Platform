@@ -8,7 +8,7 @@ import connect       from "./db/db.js";
 import userRouter    from "./routes/user.route.js";
 import projectRouter from "./routes/Project.route.js";
 import aiRouter      from "./routes/ai.route.js";
-import { Analytics } from "@vercel/analytics/next"
+
 
 connect();
 

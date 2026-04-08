@@ -12,7 +12,6 @@
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
     "@tailwindcss/vite": "^4.1.14",
-    "@vercel/analytics": "^2.0.1",
     "@webcontainer/api": "^1.6.1",
     "axios": "^1.7.0",
     "highlight.js": "^11.11.1",
