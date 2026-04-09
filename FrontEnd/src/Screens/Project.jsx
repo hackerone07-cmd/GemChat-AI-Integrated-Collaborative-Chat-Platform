@@ -159,6 +159,10 @@ const REACT_SCAFFOLD = {
     lang:"javascript",
     content:`import { defineConfig } from 'vite'\nimport react from '@vitejs/plugin-react'\nexport default defineConfig({ plugins: [react()] })\n`,
   },
+  ".npmrc":{
+    lang:"plaintext",
+    content:`fund=false\naudit=false\nprogress=false\nprefer-offline=true\n`,
+  },
   "index.html":{
     lang:"html",
     content:`<!DOCTYPE html>\n<html lang="en">\n  <head>\n    <meta charset="UTF-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n    <title>React App</title>\n  </head>\n  <body>\n    <div id="root"></div>\n    <script type="module" src="/src/main.jsx"></script>\n  </body>\n</html>\n`,
@@ -487,6 +491,30 @@ const Project=()=>{
   const addLine=useCallback((t,type="output")=>setLines(p=>[...p,{t:String(t),type,id:uid()}]),[]);
   const clrLines=()=>setLines([]);
   const lc=t=>({command:"#f0c040",error:C.red,success:C.green,info:"#89dceb",warning:C.yellow}[t]||"#ccc");
+  const packageFingerprint = useCallback((tree) => (
+    `${tree["package.json"]?.content ?? ""}\n@@LOCK@@\n${tree["package-lock.json"]?.content ?? ""}`
+  ), []);
+  const writeFileToContainer = useCallback((path, content = "") => {
+    if (!wcMountedRef.current) return;
+    getWebcontainer()
+      .then(async (inst) => {
+        const parts = path.replace(/^\//, "").split("/").filter(Boolean);
+        const dirs = parts.slice(0, -1);
+        let current = "";
+        for (const dir of dirs) {
+          current = current ? `${current}/${dir}` : dir;
+          try { await inst.fs.mkdir(current); } catch {}
+        }
+        await inst.fs.writeFile(path, content);
+      })
+      .catch(() => {});
+  }, []);
+  const removePathFromContainer = useCallback((path, type = "file") => {
+    if (!wcMountedRef.current) return;
+    getWebcontainer()
+      .then(inst => inst.fs.rm(path, { recursive: type === "dir", force: true }).catch(() => {}))
+      .catch(() => {});
+  }, []);
 
   // ── File tree ────────────────────────────────────────────────────────────────
   const tree=useMemo(()=>{
@@ -541,21 +569,23 @@ const Project=()=>{
     if(files[fp]){alert(`"${fp}" already exists`);return;}
     const lang=getLang(name);const content=starter(name,lang);
     setFiles(p=>({...p,[fp]:{content,lang}}));
+    writeFileToContainer(fp,content);
     openFile(fp);
     // Persist to DB
     axios.patch(`/projects/${projectId}/files/${encodeURIComponent(fp)}`,{content,lang}).catch(console.error);
     sendMessage("file-created",{projectId,path:fp,content,lang});
-  },[files,openFile,projectId]);
+  },[files,openFile,projectId,writeFileToContainer]);
 
   const createFolder=useCallback((par,raw)=>{
     const name=raw.trim();const fp=par?`${par}/${name}`:name;
     const kp=`${fp}/.gitkeep`;
     if(files[kp]){alert(`"${fp}" exists`);return;}
     setFiles(p=>({...p,[kp]:{content:"",lang:"plaintext"}}));
+    writeFileToContainer(kp,"");
     // Persist placeholder to DB so folder survives refresh
     axios.patch(`/projects/${projectId}/files/${encodeURIComponent(kp)}`,{content:"",lang:"plaintext"}).catch(console.error);
     sendMessage("file-created",{projectId,path:kp,content:"",lang:"plaintext"});
-  },[files,projectId]);
+  },[files,projectId,writeFileToContainer]);
 
   const deleteItem=useCallback((path,type)=>{
     if(!window.confirm(`Delete "${path.split("/").pop()}"?`))return;
@@ -573,11 +603,12 @@ const Project=()=>{
     });
     setTabs(p=>type==="dir"?p.filter(t=>!t.startsWith(path+"/")):p.filter(t=>t!==path));
     if(active===path||(type==="dir"&&active?.startsWith(path+"/")))setActive(null);
+    removePathFromContainer(path,type);
     // Persist deletion to DB
     axios.delete(`/projects/${projectId}/files/${encodeURIComponent(path)}?type=${type}`).catch(console.error);
     saveWholeTree(nextFiles).catch(console.error);
     sendMessage("file-deleted",{projectId,path,type});
-  },[active,projectId,saveWholeTree]);
+  },[active,projectId,removePathFromContainer,saveWholeTree]);
 
   const renameItem=useCallback((old,nn,type)=>{
     const parts=old.split("/");parts[parts.length-1]=nn;const np=parts.join("/");
@@ -594,12 +625,16 @@ const Project=()=>{
     setFiles(updatedFiles);
     setTabs(p=>p.map(t=>t===old?np:t));
     if(active===old)setActive(np);
+    removePathFromContainer(old,type);
+    Object.entries(updatedFiles)
+      .filter(([k])=>type==="file"?k===np:k.startsWith(np+"/"))
+      .forEach(([k,v])=>writeFileToContainer(k,v.content));
     // Persist rename: delete old, save new keys
     axios.delete(`/projects/${projectId}/files/${encodeURIComponent(old)}?type=${type}`).catch(console.error);
     const toSave=Object.entries(updatedFiles).filter(([k])=>type==="file"?k===np:k.startsWith(np+"/"));
     toSave.forEach(([k,v])=>axios.patch(`/projects/${projectId}/files/${encodeURIComponent(k)}`,{content:v.content,lang:v.lang}).catch(console.error));
     sendMessage("file-renamed",{projectId,oldPath:old,newPath:np,type});
-  },[files,active,projectId]);
+  },[files,active,projectId,removePathFromContainer,writeFileToContainer]);
 
   // ── Convert flat { "src/foo.jsx": ... } → WebContainer nested tree ────────────
   // WebContainer mount() requires:  { src: { directory: { "foo.jsx": { file: {...} } } } }
@@ -642,7 +677,6 @@ const Project=()=>{
     }
 
     setRunning(true);
-    wcMountedRef.current = false;
     clrLines(); setRpTab("console");
     addLine("⏳  Booting WebContainer (first load ~5s)...", "info");
 
@@ -658,16 +692,21 @@ const Project=()=>{
     try {
       // Use explicitly passed fileMap, OR fall back to the ref (always latest)
       const src = fileMap ?? filesRef.current;
-      const mountTree = toWcTree(src);
-      await instance.mount(mountTree);
-      wcMountedRef.current = true;   // FS is live — onChange can now writeFile
+      const depsFingerprint = packageFingerprint(src);
+      const needsFreshMount = !wcMountedRef.current || !!fileMap;
+      if (needsFreshMount) {
+        const mountTree = toWcTree(src);
+        await instance.mount(mountTree);
+        wcMountedRef.current = true;   // FS is live — onChange can now writeFile
+      } else {
+        addLine("✓  Reusing mounted workspace", "success");
+      }
 
-      const packageJsonContent = src["package.json"]?.content ?? "";
-      const needsInstall = installedPkgRef.current !== packageJsonContent;
+      const needsInstall = installedPkgRef.current !== depsFingerprint;
       if (needsInstall) {
         addLine("📦  npm install...", "info");
 
-        const ip = await instance.spawn("npm", ["install"]);
+        const ip = await instance.spawn("npm", ["install", "--prefer-offline", "--no-audit", "--no-fund", "--progress=false"]);
         ip.output.pipeTo(new WritableStream({
           write(chunk) {
             // Use queueMicrotask so React state updates don't block the stream
@@ -681,7 +720,7 @@ const Project=()=>{
           setRunning(false); return;
         }
 
-        installedPkgRef.current = packageJsonContent;
+        installedPkgRef.current = depsFingerprint;
         addLine("✓  Dependencies installed", "success");
       } else {
         addLine("✓  Using cached dependencies", "success");
@@ -720,7 +759,7 @@ const Project=()=>{
       setRunning(false);
     }
   // Only addLine — no files/wc state in deps. filesRef always has latest files.
-  }, [addLine]);
+  }, [addLine, packageFingerprint]);
 
   // ── Kill the running WebContainer process (dev server) ────────────────────────
   const killProcess = useCallback(async () => {
@@ -732,7 +771,6 @@ const Project=()=>{
     }
     try { await shellRef.current.kill(); } catch { }
     shellRef.current = null;
-    wcMountedRef.current = false;
     setRunning(false);
     setPreviewSrc(null);
     setPreviewUrl("");
@@ -848,14 +886,12 @@ const Project=()=>{
       //    Calling getWebcontainer() before mount boots the container prematurely
       //    and fs.writeFile on an unmounted FS throws silently-corrupting errors.
       if(wcMountedRef.current){
-        getWebcontainer().then(inst=>
-          inst.fs.writeFile(active,newContent).catch(()=>{})
-        ).catch(()=>{});
+        writeFileToContainer(active,newContent);
       }
       // 3. Broadcast to collaborators
       sendMessage("code-change",{projectId,filename:active,code:newContent,language:activeLang});
     },400);
-  },[active,activeLang,projectId]);
+  },[active,activeLang,projectId,writeFileToContainer]);
 
   useEffect(()=>{
     if(!projectId){
@@ -918,7 +954,7 @@ const Project=()=>{
       setFiles(p=>({...p,[filename]:{content:code??"",lang:language||getLang(filename)}}));
       // Only write to WC filesystem if it's actually mounted
       if(wcMountedRef.current){
-        getWebcontainer().then(inst=>inst.fs.writeFile(filename,code??"").catch(()=>{})).catch(()=>{});
+        writeFileToContainer(filename,code??"");
       }
       if(edRef.current&&active===filename){
         supRef.current=true;
@@ -927,9 +963,30 @@ const Project=()=>{
         supRef.current=false;
       }
     });
-    receiveMessage("file-created",({path,content,lang})=>setFiles(p=>({...p,[path]:{content:content??"",lang:lang||getLang(path)}})));
-    receiveMessage("file-deleted",({path,type})=>{setFiles(p=>{const n={...p};if(type==="dir")Object.keys(n).forEach(k=>{if(k.startsWith(path+"/"))delete n[k];});else delete n[path];return n;});setTabs(p=>type==="dir"?p.filter(t=>!t.startsWith(path+"/")):p.filter(t=>t!==path));});
-    receiveMessage("file-renamed",({oldPath,newPath,type})=>{setFiles(p=>{const n={...p};if(type==="file"){n[newPath]={...n[oldPath],lang:getLang(newPath)};delete n[oldPath];}else{Object.keys(n).forEach(k=>{if(k.startsWith(oldPath+"/")){n[k.replace(oldPath,newPath)]=n[k];delete n[k];}});}return n;});setTabs(p=>p.map(t=>t===oldPath?newPath:t));});
+    receiveMessage("file-created",({path,content,lang})=>{setFiles(p=>({...p,[path]:{content:content??"",lang:lang||getLang(path)}}));writeFileToContainer(path,content??"");});
+    receiveMessage("file-deleted",({path,type})=>{setFiles(p=>{const n={...p};if(type==="dir")Object.keys(n).forEach(k=>{if(k.startsWith(path+"/"))delete n[k];});else delete n[path];return n;});setTabs(p=>type==="dir"?p.filter(t=>!t.startsWith(path+"/")):p.filter(t=>t!==path));removePathFromContainer(path,type);});
+    receiveMessage("file-renamed",({oldPath,newPath,type})=>{
+      let renamedEntries=[];
+      setFiles(p=>{
+        const n={...p};
+        if(type==="file"){
+          n[newPath]={...n[oldPath],lang:getLang(newPath)};
+          delete n[oldPath];
+        }else{
+          Object.keys(n).forEach(k=>{
+            if(k.startsWith(oldPath+"/")){
+              n[k.replace(oldPath,newPath)]=n[k];
+              delete n[k];
+            }
+          });
+        }
+        renamedEntries=Object.entries(n).filter(([k])=>type==="file"?k===newPath:k.startsWith(newPath+"/"));
+        return n;
+      });
+      setTabs(p=>p.map(t=>t===oldPath?newPath:t));
+      removePathFromContainer(oldPath,type);
+      renamedEntries.forEach(([k,v])=>writeFileToContainer(k,v.content));
+    });
     receiveMessage("kicked",({projectId:pid})=>{if(pid===projectId){alert("You were removed.");navigate("/dashboard");}});
     receiveMessage("project-deleted",({projectId:pid})=>{if(pid===projectId){alert("Project deleted.");navigate("/dashboard");}});
     receiveMessage("member-removed",({userId})=>setMembers(p=>p.filter(m=>m._id!==userId)));
